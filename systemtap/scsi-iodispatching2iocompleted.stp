@@ -1,0 +1,57 @@
+#! /usr/bin/env stap
+
+/*
+ * Based off /usr/share/systemtap/tapset/linux/scsi.stp
+ * Observe scsi_req latencies during parallel AIO
+ * sudo numactl -C 8 fio --name=job --filename=/dev/sdb:/dev/sdc:/dev/sdd:/dev/sde:/dev/sdf:/dev/sdg --rw=randread --size=1G --bs=4k --ioengine=libaio --direct=1 --iodepth=2048 --numjobs=1 --clocksource=cpu --norandommap --time_based --invalidate=1 --ramp_time=10 --runtime=290
+ * sudo apt install ubuntu-dbgsym-keyring
+ * echo "deb http://ddebs.ubuntu.com $(lsb_release -cs) main restricted universe multiverse 
+   deb http://ddebs.ubuntu.com $(lsb_release -cs)-updates main restricted universe multiverse
+   deb http://ddebs.ubuntu.com $(lsb_release -cs)-proposed main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/ddebs.list
+ * sudo apt-get update
+ * sudo apt-get install linux-image-$(uname -r)-dbgsym
+ * sudo apt-get install -y systemtap gcc 
+ */
+
+global req_time%[25000], req_req_time%[25000], etimes, rtimes
+
+probe scsi.iodispatching
+{
+    req_time[$cmd] = gettimeofday_us()
+    req_req_time[req_addr] = gettimeofday_us()
+
+}
+
+probe scsi.iocompleted
+{
+    t = gettimeofday_us()
+    s =  req_time[$cmd]
+    u = req_req_time[req_addr]
+    delete req_time[$cmd]
+    delete req_req_time[req_addr]
+    if (s) {
+        etimes[sprintf("%d:%d", host_no, dev_id), data_direction] <<< t - s
+    }
+    if (u) {
+        rtimes[sprintf("%d:%d:%x", host_no, dev_id, req_addr), data_direction] <<< t - u
+    }
+}
+
+probe timer.s(5), end {
+    ansi_clear_screen()
+    printf("%s:%s %7s %10s %10s %10s\n",
+         "host_no", "dev_id", "rw", "total (us)", "count", "avg (us)")
+
+    foreach ([x, y] in etimes - limit 10)
+        printf("%20s %10d %10d %10d %10d\n", x, y, @sum(etimes[x,y]), @count(etimes[x,y]), @avg(etimes[x,y]))
+
+    printf("%s:%s:%s %10s %10s %10s %10s\n",
+         "host_no", "dev_id", "req_addr", "rw", "total (us)", "count", "avg (us)")
+
+    foreach ([x, y] in rtimes - limit 50)
+        printf("%10s %10d %10d %10d %10d\n", x, y, @sum(rtimes[x,y]), @count(rtimes[x,y]), @avg(rtimes[x,y]))
+
+
+    delete etimes
+    delete rtimes
+}
